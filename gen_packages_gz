@@ -1,0 +1,47 @@
+#!/usr/bin/perl
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2008-2018 ANSSI. All Rights Reserved.
+
+#
+# gen_packages_gz - generate a Packages.gz index for a mirror,
+# keeping only fields useful for CLIP
+# Should be faster than apt-ftparchive, since it does not need 
+# to calculate SHA1/SHA256 on each package.
+# Copyright (C) 2013 SGDSN/ANSSI
+# Author: Vincent Strubel <clipos@ssi.gouv.fr>
+#
+# All rights reserved.
+#
+
+use strict;
+use warnings;
+
+use File::Spec;
+use CLIP::Logger ':all';
+use CLIP::Pkg::Download ':all';
+
+my ($base, $dist, $outpath) = @ARGV;
+
+$base = File::Spec->rel2abs($base) 
+	unless (File::Spec->file_name_is_absolute($base));
+$outpath = File::Spec->rel2abs($outpath) 
+	unless (File::Spec->file_name_is_absolute($outpath));
+
+unless (chdir "$base/$dist") {
+	clip_warn "could not chdir to $base/$dist";
+	exit 1;
+}
+
+my @pkgs = <*.deb>;
+
+unless (chdir "$base") {
+	clip_warn "could not chdir to $base";
+	exit 1;
+}
+
+unless (clippkg_gen_packages_gz($dist, "", $outpath, \@pkgs, 0)) {
+	clip_warn "failed to generate packages.gz from $base";
+	exit 1;
+}
+
+print "Mirror index generated in $outpath.\n";

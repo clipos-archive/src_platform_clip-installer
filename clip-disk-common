@@ -1,0 +1,569 @@
+#!/bin/sh
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2008-2018 ANSSI. All Rights Reserved.
+
+#########################################################
+# clip-disk-common
+# Common functions for CLIP installation and post-installation 
+# configuration.
+# Copyright (C) 2010-2013 ANSSI
+# Authors:
+#   Vincent Strubel <clipos@ssi.gouv.fr>
+#   Mickaël Salaün <clipos@ssi.gouv.fr>
+# All rights reserved.
+##########################################################
+
+source "/lib/rc/sh/functions.sh"
+
+export LC_ALL="fr_FR"
+export LANG="fr_FR"
+
+BIND_MOUNTS="/mounts/admin_priv/etc.admin /etc/admin
+/mounts/admin_priv/etc.ike2 /etc/admin/ike2
+/mounts/audit_priv/etc.audit /etc/audit
+/mounts/var /var
+/home/etc.users/tcb /etc/tcb
+/home/etc.users/core /etc/core
+/mounts/usr /usr/local"
+
+ROOT="/clip1"
+CRYPT=""
+PASS=""
+
+USER=""
+PASSWD=""
+USER_DECRYPTED=""
+MAX_LOOPDEV=7
+
+warn() {
+	cleanup
+	if [[ -n "${DISPLAY}" ]]; then
+		Xdialog --msgbox "${1}" 0 0 2>/dev/null
+	else 
+		echo "${1}" >&2
+	fi
+	echo "${1}" >&2
+}
+
+cleanup() {
+	cleanup_fs
+}
+
+error() {
+	warn "${1}"
+	cleanup
+	exit 1
+}
+
+eend_error() {
+	eend "$1"
+	if [ "$1" -ne 0 ]; then
+		cleanup
+		exit 1
+	fi
+}
+
+check_mounted() {
+	if mount | grep -q "${ROOT}/home"; then
+		if [[ ! -f "${ROOT}/etc/conf.d/clip" ]]; then
+			error "Fichier de configuration absent. CLIP n'a pas encore été installé sur le poste."
+		fi
+		source "${ROOT}/etc/conf.d/clip"
+		DO_MOUNT_CLEANUP=""
+	else
+		mount_fs || return 1
+		DO_MOUNT_CLEANUP="yes"
+	fi
+}
+
+setup_partitions() {
+	export CLIP_BOOT_PART=${ROOT_DISK}1
+	export CLIP_HOME_PART=${ROOT_DISK}2
+	export CLIP_LOG_PART=${ROOT_DISK}3
+	export CLIP_SWAP_PART=${ROOT_DISK}9
+
+	if [[ "${ROOT}" == "/clip1" ]]; then
+		export CLIP_ROOT_PART="${ROOT_DISK}5"
+		export CLIP_MOUNTS_PART="${ROOT_DISK}6"
+		export CLIP_RMH_PART="${ROOT_DISK}7"
+		export CLIP_RMB_PART="${ROOT_DISK}8"
+		setup_raid 1 2 3 5 6 7 8 9
+	else 
+		export CLIP_ROOT_PART="${ROOT_DISK}10"
+		export CLIP_MOUNTS_PART="${ROOT_DISK}11"
+		export CLIP_RMH_PART="${ROOT_DISK}7"
+		export CLIP_RMB_PART="${ROOT_DISK}8"
+		setup_raid 1 2 3 5 6 9 10 11
+	fi
+}
+
+get_rootdisk() {
+	local disks="$(/usr/bin/clip-list-install-disks -r)"
+	local num="$(echo "${disks}" | wc -l)"
+
+	if [[ $num -eq 0 ]]; then
+		error "Aucun disque susceptible d'accueillir CLIP n'a été identifié."
+	fi
+
+	if [[ $num -eq 1 ]]; then
+		ROOT_DISK="${disks}"
+		return 0
+	fi
+
+	local args=""
+	local cliargs=""
+	for d in ${disks}; do
+		args="${args} ${d} ${d} 0"
+		cliargs="${cliargs} ${d}"
+	done
+
+	if [[ -n "${DISPLAY}" ]]; then
+		local disk="$(Xdialog --title "Choix du disque" --no-tags --stdout \
+			--radiolist "Veuillez séléctionner le disque sur lequel CLIP est installé" 0 0 ${num} ${args})"
+	else
+		echo "Veuillez selectionner le disque sur lequel CLIP est installé"
+		echo "(Choix possibles : ${cliargs})"
+		read disk
+	fi
+	if [[ -z "${disk}" ]]; then
+		cleanup
+		exit 0
+	fi
+	echo "${cliargs}" | grep -qw "${disk}" \
+		|| error "Choix invalide : ${disk}"
+
+	ROOT_DISK="${disk}"
+}
+
+get_password() {
+	if [[ -n "${DISPLAY}" ]]; then
+		PASS="$(Xdialog --password --stdout --title "Mot de passe de chiffrement" --inputbox "Veuillez saisir le mot de passe de chiffrement du disque" 0 0)"
+	else
+		echo "Veuillez saisir le mot de passe de chiffrement du disque" 
+		read -s PASS
+	fi
+	[[ $? -eq 0 ]] || error "Montage impossible sans mot de passe"
+	[[ -n "${PASS}" ]] || error "Montage impossible sans mot de passe"
+}
+
+get_user_password() {
+	if [[ -n "${DISPLAY}" ]]; then
+		PASSWD="$(Xdialog --password --stdout --title "Mot de passe de chiffrement utilisateur" --inputbox "Veuillez saisir le mot de passe de l'utilisateur" 0 0)"
+	else
+		echo "Veuillez saisir le mot de passe de chiffrement de l'utilisateur" 
+		read -s PASSWD
+	fi
+	[[ $? -eq 0 ]] || error "Montage impossible sans mot de passe"
+	[[ -n "${PASSWD}" ]] || error "Montage impossible sans mot de passe"
+}
+
+map_partition() {
+	local part="${1}"
+	local key=""
+	local num="${part#${ROOT_DISK}}"
+	local name="$(basename -- "${part}")"
+
+	if [ -e "/dev/mapper/${name}" ]; then
+		return
+	fi
+
+	key="$(echo "${PASS}${num}" | sha512sum | awk '{print $1}')"
+	[[ -n "${key}" ]] || error "Impossible de dériver la clé de chiffrement de ${part}"
+
+	echo -n "${key}" | cryptsetup luksOpen "${part}" "${name}" \
+		|| error "Le déchiffrement a échoué"
+}
+
+create_mappings() {
+	map_partition "${CLIP_ROOT_PART}"
+	CLIP_ROOT_PART="/dev/mapper${CLIP_ROOT_PART#/dev}"
+	map_partition "${CLIP_MOUNTS_PART}"
+	CLIP_MOUNTS_PART="/dev/mapper${CLIP_MOUNTS_PART#/dev}"
+	map_partition "${CLIP_LOG_PART}"
+	CLIP_LOG_PART="/dev/mapper${CLIP_LOG_PART#/dev}"
+	map_partition "${CLIP_RMH_PART}"
+	CLIP_RMH_PART="/dev/mapper${CLIP_RMH_PART#/dev}"
+	map_partition "${CLIP_RMB_PART}"
+	CLIP_RMB_PART="/dev/mapper${CLIP_RMB_PART#/dev}"
+}
+
+prepare_parts() {
+	if [ -z "${ROOT_DISK}" ]; then
+		get_rootdisk
+	fi
+	setup_partitions
+
+	mkdir -p "/tmp/boot"
+	emount_boot "${CLIP_BOOT_PART}"  "/tmp/boot" \
+		|| error "Impossible de monter ${CLIP_BOOT_PART} sur /tmp/boot."
+
+	# avant, conf était un lien symbolique, maintenant il s'agit d'un
+	# fichier standard contenant une directive include
+	# cela dit, peu importe l'installation courante, le fait est
+	# que le mode de chiffrement ne changera pas, donc on peut regarder
+	# toujours le même fichier de conf
+	local conf='/tmp/boot/extlinux_5.conf'
+	if [ ! -f "${conf}" ]; then
+		conf='/tmp/boot/uboot'
+	fi
+
+  if [[ -f '/tmp/boot/escrow_key' ]]; then
+    echo "Escrow key found: using it"
+    PASS=$(cat '/tmp/boot/escrow_key')
+  fi
+
+	if [ -f "${conf}" ]; then
+		if grep -q 'crypt0' "${conf}"; then
+			CRYPT="crypt0"
+      if [[ -z "${PASS}" ]]; then
+        get_password
+      fi
+		elif grep -q 'crypt1' "${conf}"; then
+			CRYPT="crypt1"
+      if [[ -z "${PASS}" ]]; then
+			  PASS="$(cat '/tmp/boot/master_key')"
+      fi
+		elif grep -q 'crypt2' "${conf}"; then
+			CRYPT="crypt2"
+      if [[ -z "${PASS}" ]]; then
+			  PASS="$(tpm_cmd unseal '/tmp/boot/master_key.1.seal' '/dev/stdout')" \
+          || PASS="$(tpm_cmd unseal '/tmp/boot/master_key.2.seal' '/dev/stdout')" \
+          || error "couldn’t unseal primary key"
+      fi
+		fi
+	fi
+
+	if [[ -n "${CRYPT}" ]]; then
+		create_mappings
+		PASS="pull the other one..."
+	fi
+}
+
+_emount() {
+	local src="$1"
+	local dst="$2"
+	shift 2
+	if awk "-vdst=${dst}" '$2==dst {exit 1}' /proc/mounts; then
+		ebegin "${dst}"
+		mkdir -p -- "${dst}" && mount "$@" "${src}" "${dst}"
+		eend_error $?
+	fi
+}
+
+emount_ext() {
+	_emount "$1" "$2" -t ext3,ext4
+}
+
+emount_boot() {
+	_emount "$1" "$2" -t ext3,ext4,vfat
+}
+
+emount_bind() {
+	_emount "$1" "$2" --bind
+}
+
+emount_rm() {
+	local part="$1"
+	local rm_jail="$2"
+
+	if echo "${CLIP_JAILS}" | grep -q "${rm_jail}"; then
+		emount_ext "${part}" "${ROOT}/vservers/${rm_jail}"
+		mkdir -p -- "${ROOT}/vservers/${rm_jail}/admin_priv/etc.admin"
+		emount_bind "${ROOT}/vservers/${rm_jail}/admin_priv/etc.admin" "${ROOT}/etc/admin/${rm_jail}"
+	fi
+}
+
+mount_fs() {
+	awk "-vdst=${ROOT}" '$2==dst {exit 1}' /proc/mounts || return
+	prepare_parts
+	einfo "Mounting ${ROOT} partitions from ${ROOT_DISK}"
+	eindent
+
+	emount_ext "${CLIP_ROOT_PART}" "${ROOT}"
+	emount_ext "${CLIP_MOUNTS_PART}" "${ROOT}/mounts"
+	emount_ext "${CLIP_HOME_PART}" "${ROOT}/home"
+
+	echo "${BIND_MOUNTS}" | \
+		awk -vroot="${ROOT}" '{print root$1" "root$2}' \
+			| while read l; do
+		local src="$(echo "${l}" | awk '{print $1}')"
+		mkdir -p -- "${src}"
+		emount_bind ${l}
+	done
+
+	emount_ext "${CLIP_LOG_PART}" "${ROOT}/var/log"
+
+	local jail_conf
+	if [ -n "${CONF_PATH}" ]; then
+		jail_conf="${CONF_PATH}/params/conf.d/clip"
+	else
+		jail_conf="${ROOT}/etc/conf.d/clip"
+	fi
+	if [[ ! -f "${jail_conf}" ]]; then
+		error "Fichier de configuration absent : ${jail_conf}"
+	fi
+	# TODO: use a real parsing
+	source "${jail_conf}"
+
+	emount_rm "${CLIP_RMH_PART}" "rm_h"
+	emount_rm "${CLIP_RMB_PART}" "rm_b"
+
+	emount_bind /proc "${ROOT}/proc"
+	emount_bind /dev "${ROOT}/dev"
+	[ -d "/var/run/pcscd" ] && emount_bind /var/run/pcscd "${ROOT}/var/run/pcscd"
+
+	mkdir -p "${ROOT}/boot"
+	mount --move "/tmp/boot"  "${ROOT}/boot" \
+		|| error "Impossible de monter ${CLIP_BOOT_PART} sur ${ROOT}/boot."
+	eoutdent
+}
+
+setup_raid() {
+	local parts="$*"
+	local disk ret gret=0
+	if [[ "$(mdadm --examine --scan --config=partitions 2>/dev/null | wc -l)" -ge 12 ]]; then
+		einfo "Assembling RAID, if needed"
+		eindent
+		for i in ${parts}; do
+			disk="/dev/md$i"
+			grep -qE "^${disk#/dev/} : active" /proc/mdstat && continue
+			ebegin "${disk}"
+			mdadm --assemble "--auto=md$i" --config=partitions -m "$i" "${disk}" &>/dev/null
+			ret=$?
+			eend ${ret}
+			if [[ "${ret}" -ne 0 ]]; then
+				gret=1
+				break
+			fi
+		done
+		eoutdent
+	elif [[ -b "/dev/md1" ]]; then
+		gret=1
+		eerror "Partial RAID"
+	else
+		einfo "No RAID detected"
+	fi
+	return ${gret}
+}
+
+get_disk() {
+	local num="$1"
+	awk "\$2~/^\/clip[${num}]/{print \$1}" /proc/mounts | sed -nr 's,^(/dev/[^/0-9]+)[0-9]+$,\1,p' | sort -u
+}
+
+cleanup_disks() {
+	local disks="$*"
+	if [[ -z "${disks}" ]]; then
+		disks="$(get_disk 12)"
+	fi
+
+	local parts_crypt
+	local tmp_disks
+	local clip_nbs
+
+	for disk in ${disks}; do
+		case "${disk}" in
+			/clip1)
+				tmp_disks="${tmp_disks} $(get_disk 1)"
+				clip_nbs="${clip_nbs}1"
+				parts_crypt="${parts_crypt} 5 6 7 8"
+				;;
+			/clip2)
+				tmp_disks="${tmp_disks} $(get_disk 2)"
+				clip_nbs="${clip_nbs}2"
+				parts_crypt="${parts_crypt} 10 11 7 8"
+				;;
+			*)
+				tmp_disks="${tmp_disks} ${disk}"
+				;;
+		esac
+	done
+	disks="${tmp_disks}"
+	[[ -z "${disks// }" ]] && disks="$(ls -1 /dev/mapper/ | sed -nr 's,^([^0-9]+)[0-9]+$,/dev/\1,p' | sort -u)"
+	[[ -z "${clip_nbs}" ]] && clip_nbs="12"
+	[[ -z "${parts_crypt}" ]] && parts_crypt="5 6 7 8 10 11"
+	parts_crypt="3 9 ${parts_crypt}"
+
+	einfo "Cleaning up ${disks:-?}"
+	eindent
+	einfo "Unmounting preexisting Clip partitions, if any"
+	eindent
+	awk "\$2~/^\/clip[${clip_nbs}]/{print \$2}" /proc/mounts | sort -r | while read devi; do
+		ebegin "${devi}"
+		umount "${devi}"
+		eend $?
+	done
+	eoutdent
+
+	einfo "Removing preexisting LUKS mapping, if any"
+	eindent
+	for disk in ${disks}; do
+		for i in ${parts_crypt}; do
+			devi="/dev/mapper/${disk#/dev/}${i}"
+			if cryptsetup status "${devi}" 2>/dev/null >&2; then
+				ebegin "${devi}"
+				cryptsetup remove "${devi}" 2>/dev/null
+				eend $?
+			fi
+		done
+	done
+	eoutdent
+
+	einfo "Stopping preexisting RAID array, if any"
+	eindent
+	for i in 1 2 ${parts_crypt}; do
+		devi="/dev/md$i"
+		if grep -qE "^${devi#/dev/} : active" /proc/mdstat; then
+			ebegin "${devi}"
+			mdadm --stop "${devi}" &>/dev/null
+			eend $?
+		fi
+	done
+	eoutdent
+
+	eoutdent
+}
+
+cleanup_fs() {
+	einfo "Unmounting ${ROOT} partitions"
+	eindent
+	umount "/tmp/boot" 2>/dev/null
+
+	cleanup_user
+	[[ -z "${DO_MOUNT_CLEANUP}" ]] || cleanup_disks "${ROOT}"
+	eoutdent
+}
+
+### user data decryption
+
+cleanup_user() {
+	einfo "Unmounting user partitions"
+	local usermount
+	local lodev
+	local lofile
+	local part
+
+	eindent
+
+	for part in $(losetup -a | grep -E "/clip./home/(rm_./|)parts/.*\.part" | awk '{print $1 $3}' | sed -r 's/\(|\)//g') ; do
+		lodev=${part%\:*}
+		lofile=${part#*\:}
+		dmdev=$(echo "${lofile}" | sed 's/\//_/g')
+		usermount="/dev/mapper/${dmdev}"
+
+		if [[ -n "${dmdev}" ]]; then
+			ebegin "Unmount ${usermount}"
+			umount "${usermount}" &&
+			cryptsetup remove "${dmdev}"
+			eend $?
+		fi
+		einfo "Removing ${lodev}"
+		losetup -d "${lodev}"
+		eend $?
+	done
+
+	eoutdent
+}
+
+decrypt_key() {
+	local keys_dir="$1"
+	source "${ROOT}/lib/clip/userkeys.sub"
+	# overload the CRYPTPASSWD command used in output_stage1_key function
+	# (defined in userkeys.sub) and prefix it with chroot
+	CRYPTPASSWD="chroot ${ROOT} /usr/bin/cryptpasswd"
+	KEY_FILE="${keys_dir}/${USER}.key"
+	SETTINGS_FILE="${keys_dir}/${USER}.settings"
+
+	if [[ -n "${PKAUTH}" ]] ; then
+		ENC_KEY_FILE="${KEY_FILE}.enc"
+		[[ -f "${ENC_KEY_FILE}" ]] && KEY="$(p11_master_decrypt_key "${ENC_KEY_FILE}")"
+	else
+		KEY="$(output_stage2_key "${SETTINGS_FILE}" "PASSWD" "${KEY_FILE}")"
+	fi
+	return $?
+}
+
+do_losetup() {
+	local part="$1"
+	local loopnum=0
+
+	while [ "${loopnum}" -le "${MAX_LOOPDEV}" ]; do
+		if losetup "/dev/loop${loopnum}" "${part}" 2>/dev/null; then
+			LOOPDEV="/dev/loop${loopnum}"
+			LOSETUP_DONE="yes"
+			return 0
+		fi
+		let "loopnum+=1"
+	done
+	return 1
+}
+
+do_cryptsetup() {
+	local part="$1"
+	local ret
+	DMDEVICE=$(echo "${part}" | sed -e 's:/:_:g')
+	echo -n "${KEY}" | cryptsetup -c "aes-lrw-benbi" -h sha256 \
+				-s 384 create "${DMDEVICE}" "${LOOPDEV}"
+	ret=$?
+	CRYPTSETUP_DONE="yes"
+	return ${ret}
+}
+
+decrypt_user() {
+	local level part destmount
+	einfo "Decrypting ${USER} data"
+
+	eindent
+	for level in core rm_b rm_h; do
+		case "${level}" in
+			rm_*)
+				part="${ROOT}/home/${level}/parts/${USER}.part"
+				destmount="${ROOT}/vservers/${level}/user_priv/home/user/"
+				keys_dir="${ROOT}/home/${level}/keys"
+				;;
+			core)
+				part="${ROOT}/home/parts/${USER}.part"
+				destmount="${ROOT}/home/user/"
+				keys_dir="${ROOT}/home/keys"
+				;;
+			*)
+				error "Not a valid level: ${level}"
+				;;
+		esac
+
+		einfo "Level ${level} in ${destmount}"
+
+		if [ ! -e "${part}" ]; then
+			ewarn "No data found for user ${USER} and level ${level}!"
+			continue
+		fi
+
+		eindent
+
+		# ask password only once
+		if [ -z "${PASSWD}" ]; then
+			get_user_password
+			export PASSWD
+		fi
+
+		ebegin "Deriving ${level} key"
+		decrypt_key "${keys_dir}"
+		eend_error $?
+
+		ebegin "Setting up a loop device"
+		do_losetup "${part}"
+		eend_error $?
+
+		ebegin "Opening encrypted partition"
+		do_cryptsetup "${part}"
+		eend_error $?
+
+		einfo "Mounting partition"
+		mount -t ext2,ext4 "/dev/mapper/${DMDEVICE}" "${destmount}"
+		eend_error $?
+
+		eoutdent
+	done
+	eoutdent
+}
+### /user data decryption

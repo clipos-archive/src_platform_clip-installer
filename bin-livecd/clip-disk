@@ -1,0 +1,58 @@
+#!/bin/sh
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2008-2018 ANSSI. All Rights Reserved.
+
+source /opt/clip-installer/clip-disk-common
+
+usage () {
+	echo "usage: $(basename -- "$0") [-u username] <mount|umount> [clip1|clip2|all]"
+}
+
+while getopts u:h arg ; do
+	case $arg in
+	u)
+		USER="${OPTARG}"
+		;;
+	h)
+		usage
+		exit 0
+		;;
+	*)
+		usage
+		exit 1
+		;;
+	esac
+done
+
+shift $(( ${OPTIND} - 1 ))
+
+ROOT_ALL="${ROOT}"
+case "$2" in
+	clip2)
+		ROOT_ALL="/clip2"
+		;;
+	all)
+		ROOT_ALL="/clip1 /clip2"
+		;;
+esac
+
+for ROOT in ${ROOT_ALL}; do
+	case "$1" in
+		mount)
+			mount_fs
+
+			# user data shall be decrypted in only one place
+			if [[ ! -z "${USER}" && ! "${USER_DECRYPTED}" == "YES" ]]; then
+				decrypt_user
+				USER_DECRYPTED="YES"
+			fi
+			;;
+		umount)
+			DO_MOUNT_CLEANUP="YES"
+			cleanup_fs
+			;;
+		*)
+			usage
+			;;
+	esac
+done

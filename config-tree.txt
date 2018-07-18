@@ -1,0 +1,141 @@
+client0
+├── conf
+│   ├── cert [deprecated -> apt_*]
+│   ├── admin_pubkeys
+│   │   └── *
+│   ├── audit
+│   │   ├── logfiles
+│   │   └── syslog
+│   ├── audit_pubkeys
+│   │   └── *
+│   ├── apt_ca
+│   │   └── *.pem
+│   ├── apt_host
+│   │   ├── apt.key.pem
+│   │   └── apt.cert.pem
+│   ├── beacon
+│   │   ├── ca
+│   │   ├── cert
+│   │   ├── key
+│   │   └── url
+│   ├── clip_download
+│   │   ├── sources.list.clip
+│   │   ├── sources.list.rm_b
+│   │   └── sources.list.rm_h
+│   ├── devices
+│   ├── hostname
+│   ├── ike2_ca [future usage]
+│   │   └── *
+│   ├── ike2_cert
+│   │   ├── ipsec.secrets [x509]
+│   │   ├── ccsd.pvr [ccsd]
+│   │   ├── ccsd.pwd [ccsd]
+│   │   ├── gw.key [x509, passerelle]
+│   │   ├── gw.pem [x509, passerelle]
+│   │   ├── rmb.key [x509, client]
+│   │   ├── rmb.pem [x509, client]
+│   │   ├── rmh.key [x509, client]
+│   │   ├── rmh.pem [x509, client]
+│   │   ├── rmh.ppr [ccsd, client]
+│   │   ├── admin.key [x509]
+│   │   ├── admin.pem [x509]
+│   │   ├── audit.key [x509]
+│   │   ├── audit.pem [x509]
+│   │   ├── update.key [x509]
+│   │   ├── update.pem [x509]
+│   │   └── update.ppr [ccsd]
+│   ├── ike2_crl [future usage]
+│   │   └── *
+│   ├── ike2_host [future usage]
+│   │   └── *
+│   ├── net
+│   ├── net-other
+│   ├── netconf.d
+│   │   └── * [need at least a "default" profile]
+│   │       ├── admin [vpn]
+│   │       ├── hostname
+│   │       ├── hosts
+│   │       ├── net
+│   │       ├── ipsec
+│   │       ├── ipsec.* [vpn]
+│   │       ├── netfilter
+│   │       ├── resolv.conf
+│   │       ├── rm_b
+│   │       │   ├── hosts
+│   │       │   ├── proxy
+│   │       │   └── resolv.conf
+│   │       ├── rm_h
+│   │       │   ├── hosts
+│   │       │   ├── proxy
+│   │       │   ├── resolv.conf
+│   │       │   └── tls_tunnels
+│   │       ├── umts
+│   │       └── wireless
+│   ├── ntp
+│   ├── optional.clip
+│   ├── optional.rm_b
+│   ├── optional.rm_h
+│   ├── p11proxy
+│   ├── rm_b
+│   │   └── rm-session-type
+│   ├── rm_h
+│   │   └── rm-session-type
+│   ├── scdaemon
+│   ├── tls_ca
+│   │   ├── rmb
+│   │   │   └── *.pem
+│   │   └── rmh
+│   │       └── *.pem
+│   └── xscreensaver
+└── params
+    ├── conf.d
+    │   ├── clip
+    │   ├── ipsec
+    │   ├── net
+    │   ├── power
+    │   ├── printers
+    │   ├── scanners
+    │   ├── session
+    │   │   ├── adeskbar
+    │   │   └── openbox
+    │   ├── sound
+    │   └── usermgmt
+    ├── cryptd.algos
+    ├── disk_layout
+    ├── extlinux.devel
+    ├── hw
+    │   ├── firmwares.blacklist
+    │   ├── firmwares.extra
+    │   ├── modules.blacklist
+    │   └── modules.extra
+    ├── ike2_cert [deprecated -> conf/ike2_cert or conf/ike2_ca]
+    │   └── *
+    ├── postconf-script [ optional; install only: not save ]
+    │   └── <username>
+    │       └── *
+    ├── strongswan.algos
+    ├── update_keys [ccsd]
+    │   ├── ctrl.bin
+    │   ├── ctrl.bin.txt
+    │   ├── dev.bin
+    │   └── dev.bin.txt
+    ├── update_keys [civil]
+    │   ├── certs_ctrl
+    │   │   ├── ctrl.pem
+    │   │   └── root.pem
+    │   ├── certs_dev
+    │   │   ├── dev.pem
+    │   │   └── root.pem
+    │   ├── crl_ctrl
+    │   │   ├── crl.pem
+    │   │   └── crl_root.pem
+    │   ├── crl_dev
+    │   │   ├── crl.pem
+    │   │   └── crl_root.pem
+    │   └── trusted_ca.conf
+    ├── usb_keys
+    │   ├── clip.pub
+    │   ├── rm_b.pub
+    │   └── rm_h.pub
+    ├── usbkeys.conf
+    └── users.list [install only: not saved]

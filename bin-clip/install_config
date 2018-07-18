@@ -1,0 +1,203 @@
+#!/bin/sh
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2008-2018 ANSSI. All Rights Reserved.
+# Helper to install a configuration tarball with _admin
+# Copyright (C) 2015 ANSSI
+# Author: Mickaël Salaün <clipos@ssi.gouv.fr>
+# All rights reserved.
+
+source "/usr/share/clip/config-admin.sub"
+
+# Log functions
+
+alias logger="logger -t install_config[$$]"
+
+INDENT=0
+
+eindent() {
+	let INDENT++ || true
+}
+
+eoutdent() {
+	let INDENT-- || true
+}
+
+_indent() {
+	printf "%$((INDENT*4))s" ""
+}
+
+einfo() {
+	logger -p local0.info -- "info[${INDENT}]: $*"
+	_indent
+	echo "[*] $*"
+}
+
+ewarn() {
+	logger -p local0.warning -- "warning[${INDENT}]: $*"
+	_indent
+	echo "[warning] $*"
+}
+
+eerror() {
+	logger -p local0.err -- "error[${INDENT}]: $*"
+	_indent
+	echo "[error] $*"
+}
+
+ebegin() {
+	logger -p local0.info -- "begin[${INDENT}]: $*"
+	_indent
+	echo "[+] $*"
+}
+
+eend() {
+	local ret
+	case "${*:-0}" in
+		0) ret="OK";;
+		*) ret="Error ($*)";;
+	esac
+	logger -p local0.info -- "end[${INDENT}]: ${ret}"
+	_indent
+	echo "[-] ${ret}"
+}
+
+die() {
+	logger -p local0.crit -- "die[${INDENT}]: $*"
+	_indent
+	echo "[die] $*"
+	exit 1
+}
+
+
+# Installation
+
+install_tarball() {
+	local tarball="$1"
+
+	if [ ! -f "${tarball}" ]; then
+		die "Failed to found the tarball '${tarball}'"
+	fi
+	local name="$(basename -- "${tarball}")"
+	local size="$(stat -c %s -- "${tarball}")"
+	local sha1="$(sha1sum -- "${tarball}" | awk '{print $1}')"
+	einfo "Installing tarball: sha1:${sha1} size:${size} name:${name}"
+
+	CONFIG_TMP=""
+	if ! CONFIG_TMP="$(mktemp -d -t "config-admin.XXXXXX")"; then
+		die "Failed to create the temporary directory"
+	fi
+
+	# The Busybox's tar doesn't automatically detect compression format
+	local tar_opt=
+	local ext="${tarball##*.}"
+	case "${ext}" in
+		gz|tgz) tar_opt="-z";;
+		bz2|tbz2) tar_opt="-j";;
+		xz|txz) tar_opt="-J";;
+	esac
+	if ! tar -x ${tar_opt} -C "${CONFIG_TMP}" -f "${tarball}"; then
+		die "Failed to untar the config"
+	fi
+
+	# Safeguard
+	if [ ! -d "${CONFIG_TMP}/conf" ]; then
+		die "Failed find the \"/conf\" directory in the archive"
+	fi
+
+	local old
+	# Remove (minimal) old network profiles files for a VPN
+	for old in "${CONFIG_TMP}/conf/netconf.d/"*; do
+		old="${ROOT}/etc/admin/netconf.d/$(basename -- "${old}")"
+		if [ -d "${old}" ]; then
+			einfo "Removing old \"ipsec.*\" and \"admin\" files in ${old}"
+			local f
+			for f in "${old}/"ipsec.*; do
+				if [ -f "${f}" ]; then
+					rm -f -- "${f}"
+				fi
+			done
+			if [ -f "${old}/admin" ]; then
+				rm -f -- "${old}/admin"
+			fi
+		fi
+	done
+
+	# Remove CCSD keys
+	if [ -d "${CONFIG_TMP}/conf/ike2_cert" ]; then
+		old="${ROOT}/etc/admin/ike2/cert"
+		if [ -d "${old}" ]; then
+			einfo "Removing old CCSD keys in ${old}"
+			local key
+			# Busybox's shell
+			for key in "${old}/"*.ppr "${old}/"*.pvr "${old}/"*.pwd; do
+				if [ -f "${key}" ]; then
+					install_ccsd -u "${key}"
+				fi
+			done
+		fi
+	fi
+
+	einfo "Importing mutable configuration 1/2"
+	eindent
+	CONF_BASE="${CONFIG_TMP}"
+	if ! _install_confadmin_1; then
+		die "Failed to import mutable configuration 1/2"
+	fi
+	eoutdent
+
+	# Remove APT CA
+	if [ -d "${CONFIG_TMP}/conf/cert" -o -d "${CONFIG_TMP}/conf/apt_ca" ]; then
+		old="${ROOT}/etc/admin/clip_download/cacerts"
+		if [ -d "${old}" ]; then
+			einfo "Removing old APT CA in ${old}"
+			rm -f -- "${old}/"*
+		fi
+	fi
+
+	# Remove SSH remote keys
+	local user
+	for user in admin audit; do
+		if [ -d "${CONFIG_TMP}/conf/${user}_pubkeys" ]; then
+			old="${ROOT}/home/${user}/.ssh-remote/authorized_keys"
+			if [ -f "${old}" ]; then
+				einfo "Removing old SSH keys in ${old}"
+				rm -f -- "${old}"
+			fi
+		fi
+	done
+
+	einfo "Importing mutable configuration 2/2"
+	eindent
+	CONF_PATH="${CONFIG_TMP}"
+	if ! _install_confadmin_2; then
+		die "Failed to import mutable configuration 2/2"
+	fi
+	eoutdent
+}
+
+set_tmpdir() {
+	export TMPDIR="$1"
+	if [ ! -d "${TMPDIR}" ]; then
+		mkdir -p -- "${TMPDIR}"
+	fi
+}
+
+cleanup() {
+	trap - KILL INT TERM EXIT
+	set +e
+	einfo "Cleaning up"
+	if [ -d "${CONFIG_TMP}" ]; then
+		rm -rf "${CONFIG_TMP}"
+	fi
+}
+
+CONFIG_TMP=""
+trap cleanup KILL INT TERM EXIT
+
+ROOT=""
+set -e
+
+# Use the home directory because of possible space constraints
+set_tmpdir "${HOME:-/home/admin}/.tmp"
+
+install_tarball "$@"

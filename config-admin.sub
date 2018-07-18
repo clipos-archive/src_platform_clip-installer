@@ -1,0 +1,390 @@
+#!/bin/sh
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2008-2018 ANSSI. All Rights Reserved.
+#
+# Common admin related functions for Clip installer and hosts
+#
+# Copyright 2012-2013 SGDSN/ANSSI
+# Author: Mickaël Salaün <clipos@ssi.gouv.fr>
+# All rights reserved.
+
+ADMIN_UGID="4000"
+AUDIT_UGID="5000"
+
+# usage: _install_admin [-f] [/etc/admin/]<dst> [${CONF_BASE}/conf/]<src>...
+_install_admin() {
+	_install_admin_mode 0027 "$@"
+}
+
+_install_admin_all_ro() {
+	_install_admin_mode 0022 "$@"
+}
+
+_install_admin_mode() {
+	_install_prefix_owner_mode "/etc/admin" "${ADMIN_UGID}" "${ADMIN_UGID}" "$@"
+}
+
+_install_audit() {
+	_install_audit_mode 0027 "$@"
+}
+
+_install_audit_mode() {
+	_install_prefix_owner_mode "/etc/audit" "${AUDIT_UGID}" "${AUDIT_UGID}" "$@"
+}
+
+_install_prefix_owner_mode() {
+	local prefix="$1"
+	local uid="$2"
+	local gid="$3"
+	local mask_new="$4"
+	shift 4
+	local mode="0600"
+	case "${mask_new}" in
+		0027) mode="0640";;
+		0022) mode="0644";;
+		*) eerror "Unknown mask: ${mask_new}"; return 1;;
+	esac
+	local dst_type="dir"
+	if [ "$1" = "-f" ]; then
+		dst_type="file"
+		shift
+	fi
+	local dst="$1"
+	shift
+	local c src target
+	local ret=0
+	local gret=0
+
+	local mask_old="$(umask)"
+	umask "${mask_new}"
+	if [ "${dst##/}" != "${dst}" ]; then
+		dst="${ROOT}${dst}"
+	else
+		dst="${ROOT}${prefix}/${dst}"
+	fi
+	local started=0
+	for src in "$@"; do
+		if [ "${src##/}" != "${src}" ]; then
+			c="${src}"
+		else
+			c="${CONF_BASE}/conf/${src}"
+		fi
+		if [[ -f "${c}" ]]; then
+			if [ "${started}" -eq 0 ]; then
+				einfo "Copying configuration file in ${dst##${ROOT}}"
+				eindent
+				started=1
+			fi
+			local name="$(basename -- "${src}")"
+			ebegin "${name}"
+			if [ "${dst_type}" == "dir" ]; then
+				target="${dst}/${name}"
+			else
+				target="${dst}"
+			fi
+			install -D -o "${uid}" -g "${gid}" -m "${mode}" -- "${c}" "${target}" || ret=1
+			# install does not copy links, instead it copies the content of the
+			# link target. However, it does a great job at setting permissions and
+			# ownership for us.
+			if [[ -L "${c}" ]]; then
+				cp -f -d --no-preserve=mode,ownership -- "${c}" "${target}" || ret=1
+			fi
+			eend $ret
+			[[ $ret -eq 0 ]] || gret=1
+			ret=0
+		fi
+	done
+	if [ "${started}" -eq 1 ]; then
+		eoutdent
+	fi
+	umask "${mask_old}"
+	return ${gret}
+}
+
+root_only() {
+	if [ "$(id -u)" = "0" ]; then
+		"$@"
+	fi
+}
+
+# TODO: Other path than "conf/ike2_cert" require to upgrade the install_ccsd command!
+_import_ike2() {
+	local desc="$1"
+	local src="${CONF_BASE}/$2"
+	local dst="$3"
+	local ret=0 gret=0
+	local name ext
+	local racoon="320"
+	local mask
+
+	mask="$(umask)"
+	umask 0077
+	if [[ -d "${src}" ]]; then
+		einfo "Copying ${desc}"
+		eindent
+		for f in "${src}"/*; do
+			if [[ -f "${f}" ]]; then
+				name="$(basename "${f}")"
+				ext="${name##*.}"
+				if [ "$(stat -c %s -- "${f}")" -gt 0 ]; then
+					ebegin "${name}"
+					if [ "${ext}" = "ppr" -o "${ext}" = "pvr" -o "${ext}" = "pwd" ] && command -v install_ccsd >/dev/null; then
+						# Only install in /etc/admin/ike2/cert
+						install_ccsd -- "${f}" || ret=1
+					else
+						install -D -o "${racoon}" -g "${racoon}" -m 0400 "${f}" "${ROOT}/${dst}/${name}" || ret=1
+					fi
+					eend ${ret}
+					[[ ${ret} -eq 0 ]] || gret=1
+					ret=0
+				fi
+			fi
+		done
+		eoutdent
+	fi
+	umask "${mask}"
+	return ${gret}
+}
+
+_import_certs() {
+	local desc="$1"
+	local srcdir="$2"
+	local dstroot="$3"
+	local dstpath="$4"
+	local certtype="${5:-cacerts}"
+	local ret=0 gret=0
+	local precmd
+	local rootdir="/"
+
+	local modedir="0775"
+	if [[ "${certtype}" == "private" ]]; then
+		modedir="0770"
+	fi
+
+	if [[ "$(ls -1 "${srcdir}"/*.pem 2>/dev/null | wc -l)" -gt 0 ]]; then
+		einfo "Installing ${desc}"
+		eindent
+		for pem in "${srcdir}"/*.pem; do
+			name="$(basename "${pem}")"
+			ebegin "cert: ${name}"
+			install -D -o "${ADMIN_UGID}" -g "${ADMIN_UGID}" -m 0644 "${pem}" "${dstroot}/${dstpath}/${name}" || ret=1
+			eend ${ret}
+			[[ ${ret} -eq 0 ]] || gret=1
+			ret=0
+		done
+		if [ -d "${dstroot}/${dstpath}" ]; then
+			root_only chown "0:${ADMIN_UGID}" "${dstroot}/${dstpath}"
+			root_only chmod "${modedir}" "${dstroot}/${dstpath}"
+			if [ "${certtype}" == "cacerts" ]; then
+				ebegin "Hash links"
+				# Local config:
+				if ! command -v install_cert >/dev/null; then
+					precmd="chroot ${dstroot}"
+				else
+					rootdir="${dstroot}/"
+				fi
+				${precmd} /usr/bin/install_cert -d "${rootdir}${dstpath}" || ret=1
+				eend ${ret}
+			fi
+			root_only chown "${ADMIN_UGID}:${ADMIN_UGID}" "${dstroot}/${dstpath}"/* || ret=1
+		fi
+		eoutdent
+		[[ $ret -eq 0 ]] || gret=1
+		ret=0
+	else
+		einfo "No ${desc}"
+	fi
+	return ${gret}
+}
+
+_install_netconf() {
+	local netconf rm_jail target gret=0 ret=0
+	local tmpdir=$(mktemp -d -t netconf.XXXXXX)
+	cp -a "${CONF_BASE}/conf/netconf.d/" "$tmpdir/"
+	for tarball in "${tmpdir}/netconf.d/"*.tar*; do
+		if [ -f "${tarball}" ]; then
+			tar -C "${tmpdir}/netconf.d/" -xf "${tarball}" && rm "${tarball}"
+		fi
+	done
+	for netconf in "${tmpdir}/netconf.d/"* ; do
+		[ -d "${netconf}" ] || continue
+		ret=0
+		ebegin "$(basename -- "${netconf}")"
+		eindent
+		target="netconf.d/$(basename -- "${netconf}")"
+		for f in admin hostname hosts ipsec 'ipsec.*' net netfilter resolv.conf umts wireless; do
+			_install_admin "${target}" "${tmpdir}/${target}"/${f} || ret=1
+		done
+		for rm_jail in rm_h rm_b; do
+			for f in hosts proxy resolv.conf tls_tunnels; do
+				_install_admin_all_ro "${target}/${rm_jail}" "${tmpdir}/${target}/${rm_jail}"/${f} || ret=1
+			done
+		done
+		[ "${ret}" -eq 0 ] || gret=1
+		eoutdent
+		eend ${ret}
+	done
+	rm -rf "${tmpdir}"
+	return ${gret}
+}
+
+_install_confadmin_1() {
+	# TODO: update save_conf function as well
+	local jail name target
+	local ret=0 gret=0
+
+	# TODO: update save_conf function as well
+	_install_admin "conf.d" devices hostname net net-other ntp p11proxy scdaemon xscreensaver || gret=1
+	_install_admin "beacon" beacon/url || gret=1
+	if [ -d beacon/ca ]; then
+		_install_admin "beacon" beacon/ca || gret=1
+		dstpath="/etc/admin/beacon/ca"
+		rootdir=""
+		precmd=""
+		if ! command -v install_cert >/dev/null; then
+			precmd="chroot ${dstroot}"
+		else
+			rootdir="${dstroot}/"
+		fi
+		${precmd} /usr/bin/install_cert -d "${rootdir}${dstpath}" || ret=1
+	elif [ -f beacon/ca ]; then
+		dstpath="/etc/admin/beacon/ca"
+		rootdir=""
+		precmd=""
+		mkdir -p -- "${ROOT}${dstpath}"
+		_install_admin "beacon/ca" beacon/ca || gret=1
+		if ! command -v install_cert >/dev/null; then
+			precmd="chroot ${dstroot}"
+		else
+			rootdir="${dstroot}/"
+		fi
+		${precmd} /usr/bin/install_cert -d "${rootdir}${dstpath}" || ret=1
+	else
+		ln -s "/etc/admin/clip_download/ca" "${ROOT}/etc/admin/beacon/ca" || gret=1
+	fi
+	for file in cert key; do
+		if [ -f beacon/${file} ]; then
+			_install_admin "beacon" beacon/${file} || gret=1
+		else
+			ln -s "/etc/admin/clip_download/private/apt.${file}.pem" "${ROOT}/etc/admin/beacon/${file}" || gret=1
+		fi
+	done
+	_install_audit "" audit/logfiles audit/syslog || gret=1
+
+	_import_certs "APT host certs & keys" "${CONF_BASE}/conf/apt_host" "${ROOT}" "/etc/admin/clip_download/private" private || gret=1
+
+	_install_admin -f "clip_install/optional.conf.clip" "optional.clip"
+	for jail in ${CLIP_JAILS}; do
+		# root's dir:
+		mkdir -p -- "${ROOT}/etc/admin/${jail}"
+		_install_admin -f "${jail}/clip_install/optional.conf.rm" "optional.${jail}" || gret=1
+		_install_admin_all_ro "${jail}" "${jail}/rm-session-type" || gret=1
+	done
+
+	einfo "Copying netconf profiles:"
+	eindent
+	_install_netconf || gret=1
+	eoutdent
+
+	# IKEv2 config
+	_import_ike2 "mutable IKEv2 bundles" "conf/ike2_cert" "etc/admin/ike2/cert" || gret=1
+	_import_ike2 "mutable IKEv2 CA certificates" "conf/ike2_ca" "etc/admin/ike2/cacerts" || gret=1
+	_import_ike2 "mutable IKEv2 host certs & keys" "conf/ike2_host" "etc/admin/ike2/private" || gret=1
+	_import_ike2 "mutable IKEv2 CRL" "conf/ike2_crl" "etc/admin/ike2/crl" || gret=1
+
+	return ${gret}
+}
+
+_get_existing_dir() {
+	local dir
+	for dir in "$@"; do
+		if [ -d "${dir}" ]; then
+			echo "${dir}"
+			return 0
+		fi
+	done
+	return 1
+}
+
+_install_confadmin_2() {
+	local ret=0 gret=0
+
+	# TODO : remove clip_download/cert stuff once clip_download is updated
+	if [[ -e "${CONF_PATH}/conf/cert" ]]; then
+		# Legacy CA certs
+		ewarn "You need to update the installation profile: conf/cert -> conf/apt_{ca,host}" >&2
+		_import_certs "APT CA certificates" "${CONF_PATH}/conf/cert" "${ROOT}" "/etc/admin/clip_download/cacerts" || gret=1
+	fi
+	_import_certs "APT CA certificates" "${CONF_PATH}/conf/apt_ca" "${ROOT}" "/etc/admin/clip_download/cacerts" || gret=1
+
+	# TODO: rename pkcs11_cert to pkcs11_ca as well
+	_import_certs "PKCS11 CA certificates" "${CONF_PATH}/conf/pkcs11_cert" "${ROOT}" "/etc/admin/pkcs11/cacerts" || gret=1
+
+	for jail_name in $(ls -1 "${CONF_PATH}/conf/tls_ca/" 2> /dev/null); do
+		if echo "${CLIP_JAILS}" | grep -q "${jail_name}"; then
+			_import_certs "$(echo -n ${jail_name}| tr [:lower:] [:upper:]) TLS CA certificates" "${CONF_PATH}/conf/tls_ca/${jail_name}" "${ROOT}" "/etc/admin/${jail_name}/tls/cacerts" || gret=1
+		fi
+	done
+
+	ret=0
+	# clip-download config : apt sources
+	if [[ -d "${CONF_PATH}/conf/clip_download" ]]; then
+		ebegin "Installing clip_download configuration"
+		eindent
+		for t in clip rm_h rm_b; do
+			_install_admin "clip_download" "clip_download/sources.list".${t} || ret=1
+		done
+		eoutdent
+		eend ${ret}
+		[ "${ret}" -eq 0 ] || gret=1
+		ret=0
+	fi
+
+	# ADMIN public keys (remote)
+	if [[ -d "${CONF_PATH}/conf/admin_pubkeys" ]]; then
+		ebegin "Installing authorized SSH keys for ADMIN"
+		local home_ssh=
+		if ! home_ssh="$(_get_existing_dir "${ROOT}/home/adminclip" "${ROOT}/home/admin")/.ssh-remote"; then
+			eerror "No home for ADMIN"
+			ret=1
+		else
+			mkdir -p "${home_ssh}" || ret=1
+			eindent
+			for k in "${CONF_PATH}/conf/admin_pubkeys"/*; do
+				[[ -f "${k}" ]] || continue
+				einfo "$(basename "${k}")"
+				cat "${k}" >> "${home_ssh}/authorized_keys" || ret=1
+			done
+			eoutdent
+			root_only chown -R "${ADMIN_UGID}:${ADMIN_UGID}" "${home_ssh}" || ret=1
+			eend $ret
+		fi
+		[[ $ret -eq 0 ]] || gret=1
+		ret=0
+	fi
+
+	# AUDIT public keys (remote)
+	if [[ -d "${CONF_PATH}/conf/audit_pubkeys" ]]; then
+		ebegin "Installing authorized SSH keys for AUDIT"
+		local home_ssh=
+		if ! home_ssh="$(_get_existing_dir "${ROOT}/home/auditclip" "${ROOT}/home/audit")/.ssh-remote"; then
+			eerror "No home for AUDIT"
+			ret=1
+		else
+			mkdir -p "${home_ssh}" || ret=1
+			eindent
+			for k in "${CONF_PATH}/conf/audit_pubkeys"/*; do
+				[[ -f "${k}" ]] || continue
+				einfo "$(basename "${k}")"
+				cat "${k}" >> "${home_ssh}/authorized_keys" || ret=1
+			done
+			eoutdent
+			root_only chown -R "${AUDIT_UGID}:${AUDIT_UGID}" "${home_ssh}" || ret=1
+			eend $ret
+		fi
+		[[ $ret -eq 0 ]] || gret=1
+		ret=0
+	fi
+
+	return ${gret}
+}
